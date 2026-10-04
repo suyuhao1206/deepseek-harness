@@ -72,8 +72,10 @@ async function readFileAbortable(absolutePath: string, verb: 'read' | 'edit', si
 }
 
 /** Opaque version token from high-resolution identity and freshness metadata. */
-function versionOf(info: BigIntStats): FsVersion {
-  return FsVersion(`${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`)
+function versionOf(info: Stats | BigIntStats): FsVersion {
+  const mtime = 'mtimeNs' in info ? info.mtimeNs : info.mtimeMs
+  const ctime = 'ctimeNs' in info ? info.ctimeNs : info.ctimeMs
+  return FsVersion(`${info.dev}:${info.ino}:${info.size}:${mtime}:${ctime}`)
 }
 
 /**
@@ -95,6 +97,10 @@ export interface FsIoInternals {
   linkFile?: (existingPath: string, newPath: string) => Promise<void>
   /** Override target inspection after guarded publication fails. */
   inspectPublicationTarget?: (path: string) => Promise<BigIntStats>
+  /** Override stat for unit coverage. */
+  stat?: (path: string) => Promise<Stats | BigIntStats>
+  /** Override lstat for unit coverage. */
+  lstat?: (path: string) => Promise<Stats | BigIntStats>
   /** Override staging-directory removal for commit-point failure coverage. */
   removeStagingDir?: (stagingDir: string) => Promise<void>
   /** Test hook after the temp file is written/synced but before final chmod+publication. */
@@ -242,14 +248,16 @@ async function probeStats<T extends Stats | BigIntStats>(
 /**
  * Probe a path for its version, mode, type, and size. Null if absent.
  * @param absolutePath - the path to stat (typically a target key; symlinks are followed).
+ * @param internals - test hook to override operations like stat.
  * @returns the metadata, or null when the path — or a parent segment — does not exist.
  */
-export async function probe(absolutePath: string): Promise<PathInfo | null> {
-  const info = await probeStats(absolutePath, path => stat(path, { bigint: true }))
+export async function probe(absolutePath: string, internals: FsIoInternals = {}): Promise<PathInfo | null> {
+  const statFn = internals.stat ?? (path => stat(path, { bigint: true }))
+  const info = await probeStats(absolutePath, statFn)
   if (!info) return null
   return {
     version: versionOf(info),
-    mode: Number(info.mode & 0o777n),
+    mode: Number(info.mode) & 0o777,
     type: pathType(info),
     size: Number(info.size),
   }
@@ -258,14 +266,16 @@ export async function probe(absolutePath: string): Promise<PathInfo | null> {
 /**
  * Probe a path without following the final symlink component.
  * @param absolutePath - the path entry to inspect with `lstat` semantics.
+ * @param internals - test hook to override operations like lstat.
  * @returns path-entry metadata, or null when the entry is absent.
  */
-export async function probeNoFollow(absolutePath: string): Promise<PathLinkInfo | null> {
-  const info = await probeStats(absolutePath, path => lstat(path, { bigint: true }))
+export async function probeNoFollow(absolutePath: string, internals: FsIoInternals = {}): Promise<PathLinkInfo | null> {
+  const lstatFn = internals.lstat ?? (path => lstat(path, { bigint: true }))
+  const info = await probeStats(absolutePath, lstatFn)
   if (!info) return null
   return {
     version: versionOf(info),
-    mode: Number(info.mode & 0o777n),
+    mode: Number(info.mode) & 0o777,
     type: pathLinkType(info),
     size: Number(info.size),
   }
