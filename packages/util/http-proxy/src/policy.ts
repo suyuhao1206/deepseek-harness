@@ -60,6 +60,23 @@ const SUPPORTED_PROTOCOLS = new Set(['http:', 'https:'])
 const SOCKS_PROTOCOLS = new Set(['socks:', 'socks4:', 'socks4a:', 'socks5:', 'socks5h:'])
 
 /**
+ * Whether one parsed URL is a proxy address this package can route through: an `http(s):` URL that
+ * is a bare origin.
+ *
+ * undici reads a proxy URL through `parseOrigin`, which rejects a path, query, or fragment with
+ * `InvalidArgumentError: invalid url`. The installed `ProxyAgent` reaches it per request, and Node's
+ * own `setupHttpProxy` reaches it before a child program runs under `NODE_USE_ENV_PROXY`, so a value
+ * carrying one fails every request and stops every Node child from starting.
+ *
+ * @param parsed - the parsed candidate URL.
+ * @returns whether the URL can serve as a proxy address.
+ */
+function isRoutableProxyUrl(parsed: URL): boolean {
+  return SUPPORTED_PROTOCOLS.has(parsed.protocol)
+    && parsed.pathname === '/' && parsed.search === '' && parsed.hash === ''
+}
+
+/**
  * One resolved outbound proxy policy. Plain data with no methods: worker threads receive it through
  * `workerData`'s structured clone, so both sides run the identical policy rather than each re-reading
  * an environment they may not share.
@@ -80,7 +97,11 @@ export const DIRECT_POLICY: ProxyPolicy = { noProxy: '', source: 'none' }
 
 /** Why one candidate proxy value was not used. Callers decide whether this warns or fails the load. */
 export interface ProxyDiagnostic {
-  /** `socks` for a SOCKS or PAC URL this package cannot route; `invalid` for anything unparseable. */
+  /**
+   * `socks` for a SOCKS proxy this package cannot route; `invalid` for any other value that cannot
+   * serve as a proxy address — unparseable text, an unsupported scheme, or an `http(s):` URL
+   * carrying a path, query, or fragment.
+   */
   readonly kind: 'socks' | 'invalid'
   /** The environment variable that supplied the rejected value. */
   readonly origin: string
@@ -167,19 +188,32 @@ function acceptProxyUrl(
     })
     return { kind: 'rejected' }
   }
+  // A path, query, or fragment names something other than the proxy itself — a PAC file URL is the
+  // common one. undici refuses such a value, so accepting it here would install a proxy that fails
+  // every request and, through the child flag, one that stops every Node child from starting.
+  if (!isRoutableProxyUrl(parsed)) {
+    diagnostics.push({
+      kind: 'invalid',
+      origin: candidate.name,
+      message: `${candidate.name} must name a proxy address with no path, query, or fragment;`
+        + ' connecting directly for that scheme — replace a PAC file URL with the http:// or https://'
+        + ' address of the proxy itself',
+    })
+    return { kind: 'rejected' }
+  }
   return { kind: 'accepted', value: candidate.value }
 }
 
 /**
- * Whether a proxy URL is one this package accepts: parseable, with an `http:` or `https:` scheme.
- * The same test {@link acceptProxyUrl} applies, without its diagnostics.
+ * Whether a proxy URL is one this package accepts: parseable, with an `http:` or `https:` scheme and
+ * no path, query, or fragment. The same test {@link acceptProxyUrl} applies, without its diagnostics.
  *
  * @param value - the proxy URL as an environment variable holds it.
  * @returns true when the URL would be accepted.
  */
 export function isSupportedProxyUrl(value: string): boolean {
   const parsed = URL.parse(value)
-  return parsed !== null && SUPPORTED_PROTOCOLS.has(parsed.protocol)
+  return parsed !== null && isRoutableProxyUrl(parsed)
 }
 
 /**

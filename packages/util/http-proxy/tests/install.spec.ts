@@ -307,7 +307,7 @@ describe('proxyEnvironmentForChild', () => {
     })
   })
 
-  it.each(['socks4://127.0.0.1:1080', 'ftp://p:1', 'not a url'])(
+  it.each(['socks4://127.0.0.1:1080', 'ftp://p:1', 'not a url', 'http://127.0.0.1:1080/proxy.pac'])(
     'withholds NODE_USE_ENV_PROXY when the child receives %s, so a child Node still starts',
     async (refused) => {
       await withCleanProxyEnv(async () => {

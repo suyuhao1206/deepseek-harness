@@ -3,6 +3,7 @@ import type { EnvLookup } from '../src/policy.ts'
 import {
   bypassesProxy,
   isLoopbackHost,
+  isSupportedProxyUrl,
   proxyForUrl,
   resolveProxyPolicy,
   DIRECT_POLICY,
@@ -166,6 +167,47 @@ describe('resolveProxyPolicy', () => {
   it('reports a proxy URL whose scheme is neither http(s) nor SOCKS', () => {
     const { diagnostics } = resolveProxyPolicy(env({ HTTP_PROXY: 'ftp://proxy.example' }))
     expect(diagnostics[0]?.message).toMatch(/unsupported ftp:\/\/ scheme/)
+  })
+
+  // undici reads a proxy URL through `parseOrigin`, which rejects a path, query, or fragment with
+  // `InvalidArgumentError: invalid url`. Accepting one installed a proxy that failed every request
+  // and, because the child flag reuses this same acceptance test, stopped every Node child from
+  // starting — the failure the README already promised to report and skip as a PAC URL.
+  it.each([
+    'http://127.0.0.1:7890/proxy.pac',
+    'https://proxy.example:8443/pac',
+    'http://127.0.0.1:7890/?pac=1',
+    'http://127.0.0.1:7890/#pac',
+  ])('reports %s, which undici cannot use as a proxy address', (refused) => {
+    const { policy, diagnostics } = resolveProxyPolicy(env({ HTTP_PROXY: refused }))
+    expect(policy).toEqual(DIRECT_POLICY)
+    expect(diagnostics).toHaveLength(1)
+    expect(diagnostics[0]?.kind).toBe('invalid')
+    expect(diagnostics[0]?.message).toMatch(/must name a proxy address with no path, query, or fragment/)
+  })
+
+  it('keeps the scheme direct when a path-carrying value was named for it, rather than falling back', () => {
+    const { policy } = resolveProxyPolicy(env({ HTTPS_PROXY: 'http://127.0.0.1:7890/proxy.pac', HTTP_PROXY: PROXY }))
+    expect(policy.httpProxy).toBe(PROXY)
+    expect(policy.httpsProxy).toBeUndefined()
+  })
+
+  it.each(['http://127.0.0.1:7890', 'http://127.0.0.1:7890/', 'https://proxy.example'])(
+    'accepts %s, whose path is the root undici requires',
+    (accepted) => {
+      expect(isSupportedProxyUrl(accepted)).toBe(true)
+      expect(resolveProxyPolicy(env({ HTTP_PROXY: accepted })).policy.httpProxy).toBe(accepted)
+    },
+  )
+
+  it.each([
+    'http://127.0.0.1:7890/proxy.pac',
+    'http://127.0.0.1:7890/?pac=1',
+    'http://127.0.0.1:7890/#pac',
+    'socks5://127.0.0.1:1080',
+    'not a url',
+  ])('rejects %s in the child-environment guard too', (refused) => {
+    expect(isSupportedProxyUrl(refused)).toBe(false)
   })
 
 })
